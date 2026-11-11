@@ -9,7 +9,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 
 xcrun swiftc -O \
-    Sources/AETimelineZoom/*.swift \
+    Src/*.swift \
     -o "$APP/Contents/MacOS/AETimelineZoom" \
     -framework Cocoa -framework ApplicationServices
 

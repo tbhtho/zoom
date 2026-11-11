@@ -1,12 +1,11 @@
 # AE Timeline Zoom
 
-Ctrl+scroll timeline zoom for **After Effects 2022**. AE 2022 has no
-Ctrl+scroll zoom for the timeline; this menu-bar utility adds one without
-touching the app.
+Adds modifier+scroll timeline zoom to **After Effects 2022**, which has no
+built-in scroll-wheel zoom for the Timeline.
 
-Hold **Control** and scroll over the Timeline to zoom around the pointer.
+Hold **Command** and scroll over the Timeline to zoom around the pointer.
 Plain scroll is untouched, so normal up/down scrolling still works. Horizontal
-scroll and Ctrl+scroll outside the Timeline pass through.
+scroll and modifier+scroll outside the Timeline pass through.
 
 ## Build
 
@@ -22,6 +21,7 @@ launch; toggle it from the menu-bar item.
 
 `~/Library/Application Support/AETimelineZoom/config.json`
 
+- `zoomModifier` — `command` (default), `control`, `option`, `shift`. Also in the menu.
 - `invertDirection` — flip zoom direction.
 - `mode` — `optionScroll` (native, pointer-centred) or `keys` (`=` / `-`).
 - `timelineTopFraction` — `null` reads the Timeline split from AE's
@@ -35,6 +35,6 @@ launch; toggle it from the menu-bar item.
 
 ## How it works
 
-A session-level `CGEvent` tap rewrites only vertical Control+scroll events inside
+A session-level `CGEvent` tap rewrites only modifier+vertical scroll events inside
 the Timeline panel into After Effects' native Option+scroll zoom. Everything else
 is left alone.

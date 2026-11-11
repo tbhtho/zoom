@@ -9,8 +9,9 @@ struct Config {
     var topFraction: Double? = nil   // override; nil = read AE workspace layout
     var chromeTop: Double = 64       // title bar + tool bar above the panel area
     var statusBar: Double = 17       // status bar below the panel area
-    var invert: Bool = false         // Control+scroll up = zoom out
+    var invert: Bool = false         // modifier+scroll up = zoom out
     var mode: String = "optionScroll" // "optionScroll" (native, cursor-centred) or "keys" (= / - shortcuts)
+    var modifier: String = "command" // zoom trigger: command, control, option, shift
     var verbose = false
 
     static let path = FileManager.default.homeDirectoryForCurrentUser
@@ -26,8 +27,25 @@ struct Config {
         if let v = o["statusBar"] as? Double { c.statusBar = v }
         if let v = o["invertDirection"] as? Bool { c.invert = v }
         if let v = o["mode"] as? String { c.mode = v }
+        if let v = o["zoomModifier"] as? String { c.modifier = ScrollRouter.normalized(v) }
         if let v = o["verbose"] as? Bool { c.verbose = v }
         return c
+    }
+
+    func persist() {
+        let object: [String: Any] = [
+            "enabled": enabled,
+            "zoomModifier": modifier,
+            "mode": mode,
+            "timelineTopFraction": topFraction.map { $0 as Any } ?? NSNull(),
+            "chromeTop": chromeTop,
+            "statusBar": statusBar,
+            "invertDirection": invert,
+            "verbose": verbose
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: object,
+                                                     options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: Config.path, options: .atomic)
     }
 }
 
@@ -66,6 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let defaults = """
             {
               "enabled": true,
+              "zoomModifier": "command",
               "mode": "optionScroll",
               "timelineTopFraction": null,
               "chromeTop": 64,
@@ -75,6 +94,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             """
             try? defaults.write(to: Config.path, atomically: true, encoding: .utf8)
+        } else if let d = try? Data(contentsOf: Config.path),
+                  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  o["zoomModifier"] == nil {
+            config.persist() // migrate configs written before the modifier existed
         }
     }
 
@@ -91,9 +114,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func rebuildMenu() {
         let m = NSMenu()
-        let toggle = NSMenuItem(title: "Control+Scroll Zoom in Timeline", action: #selector(toggleEnabled), keyEquivalent: "")
+        let toggle = NSMenuItem(title: "\(ScrollRouter.displayName(config.modifier))+Scroll Zoom in Timeline",
+                                action: #selector(toggleEnabled), keyEquivalent: "")
         toggle.state = config.enabled ? .on : .off
         m.addItem(toggle)
+
+        let modifierItem = NSMenuItem(title: "Zoom Modifier", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for name in ScrollRouter.modifiers {
+            let item = NSMenuItem(title: ScrollRouter.displayName(name),
+                                  action: #selector(setModifier(_:)), keyEquivalent: "")
+            item.representedObject = name
+            item.state = (config.modifier == name) ? .on : .off
+            submenu.addItem(item)
+        }
+        modifierItem.submenu = submenu
+        m.addItem(modifierItem)
+
         m.addItem(NSMenuItem(title: "Show Timeline Zone", action: #selector(showZone), keyEquivalent: ""))
         m.addItem(NSMenuItem(title: "Recompute Zone from Workspace", action: #selector(recompute), keyEquivalent: ""))
         m.addItem(.separator())
@@ -111,6 +148,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleEnabled() {
         config.enabled.toggle()
+        config.persist()
+        rebuildMenu()
+    }
+
+    @objc private func setModifier(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        config.modifier = ScrollRouter.normalized(name)
+        config.persist()
         rebuildMenu()
     }
 
@@ -215,7 +260,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let action = ScrollRouter.action(dy: dy,
                                          dx: dx,
-                                         control: event.flags.contains(.maskControl),
+                                         flags: event.flags,
+                                         modifier: config.modifier,
                                          inTimeline: rect.contains(p),
                                          enabled: config.enabled,
                                          mode: config.mode)
@@ -223,8 +269,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hitCount += 1
         if config.verbose {
-            NSLog("AETimelineZoom: Ctrl+scroll %.2f at (%.0f,%.0f) inside timeline %@ -> zoom",
-                  delta, p.x, p.y, NSStringFromRect(rect))
+            NSLog("AETimelineZoom: %@+scroll %.2f at (%.0f,%.0f) inside timeline %@ -> zoom",
+                  ScrollRouter.displayName(config.modifier), delta, p.x, p.y, NSStringFromRect(rect))
         }
 
         if config.mode == "keys" {
@@ -235,7 +281,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let flags = event.flags
         guard let copy = event.copy() else { return Unmanaged.passUnretained(event) }
         var newFlags = flags
-        newFlags.remove(.maskControl)   // AE's native gesture is Option+scroll
+        if let trigger = ScrollRouter.mask(for: config.modifier) {
+            newFlags.remove(trigger)   // AE's native gesture is Option+scroll
+        }
         newFlags.insert(.maskAlternate)
         if config.invert {
             copy.setDoubleValueField(.scrollWheelEventDeltaAxis1, value: -delta)
@@ -335,7 +383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         w.level = .floating
         w.hasShadow = false
         w.collectionBehavior = [.canJoinAllSpaces, .transient]
-        let label = NSTextField(labelWithString: "Ctrl+scroll = timeline zoom")
+        let label = NSTextField(labelWithString: "\(ScrollRouter.glyph(config.modifier))+scroll = timeline zoom")
         label.font = .systemFont(ofSize: 13, weight: .semibold)
         label.textColor = .white
         label.sizeToFit()
@@ -365,20 +413,27 @@ if CommandLine.arguments.contains("--axdump") {
 
 if CommandLine.arguments.contains("--router-selftest") {
     // Pure routing checks; no AE, no Accessibility, no event tap.
-    let cases: [(name: String, dy: Double, dx: Double, ctrl: Bool, inside: Bool,
-                 enabled: Bool, mode: String, expect: ScrollRouter.Action)] = [
-        ("plain scroll in timeline passes", 3, 0, false, true, true, "optionScroll", .passThrough),
-        ("ctrl+scroll down in timeline zooms", -3, 0, true, true, true, "optionScroll", .zoom(delta: -3)),
-        ("ctrl+scroll up in timeline zooms", 3, 0, true, true, true, "optionScroll", .zoom(delta: 3)),
-        ("ctrl+scroll outside timeline passes", 3, 0, true, false, true, "optionScroll", .passThrough),
-        ("plain scroll outside passes", 3, 0, false, false, true, "optionScroll", .passThrough),
-        ("ctrl+horizontal passes", 0, 3, true, true, true, "optionScroll", .passThrough),
-        ("disabled passes everything", 3, 0, true, true, false, "optionScroll", .passThrough),
-        ("keys mode still zooms", 3, 0, true, true, true, "keys", .zoom(delta: 3))
+    let cmd: CGEventFlags = [.maskCommand]
+    let ctrl: CGEventFlags = [.maskControl]
+    let opt: CGEventFlags = [.maskAlternate]
+    let shift: CGEventFlags = [.maskShift]
+    let cases: [(name: String, dy: Double, dx: Double, flags: CGEventFlags, modifier: String,
+                 inside: Bool, enabled: Bool, mode: String, expect: ScrollRouter.Action)] = [
+        ("default command+scroll zooms", 3, 0, cmd, "command", true, true, "optionScroll", .zoom(delta: 3)),
+        ("control passes when modifier is command", 3, 0, ctrl, "command", true, true, "optionScroll", .passThrough),
+        ("plain scroll passes", 3, 0, [], "command", true, true, "optionScroll", .passThrough),
+        ("command outside timeline passes", 3, 0, cmd, "command", false, true, "optionScroll", .passThrough),
+        ("command horizontal passes", 0, 3, cmd, "command", true, true, "optionScroll", .passThrough),
+        ("control modifier works when selected", -3, 0, ctrl, "control", true, true, "optionScroll", .zoom(delta: -3)),
+        ("option modifier works when selected", 3, 0, opt, "option", true, true, "optionScroll", .zoom(delta: 3)),
+        ("shift modifier works when selected", 3, 0, shift, "shift", true, true, "optionScroll", .zoom(delta: 3)),
+        ("unknown modifier falls back to command", 3, 0, cmd, "hyper", true, true, "optionScroll", .zoom(delta: 3)),
+        ("disabled passes everything", 3, 0, cmd, "command", true, false, "optionScroll", .passThrough),
+        ("keys mode still zooms", 3, 0, cmd, "command", true, true, "keys", .zoom(delta: 3))
     ]
     var ok = true
     for c in cases {
-        let got = ScrollRouter.action(dy: c.dy, dx: c.dx, control: c.ctrl,
+        let got = ScrollRouter.action(dy: c.dy, dx: c.dx, flags: c.flags, modifier: c.modifier,
                                       inTimeline: c.inside, enabled: c.enabled, mode: c.mode)
         let pass = got == c.expect
         if !pass { ok = false }
